@@ -1,10 +1,10 @@
 use crate::api::print;
-use actix_web::web;
+use actix_web::web::{self, scope};
 use ipp::prelude::*;
 use std::collections::HashMap;
 
 pub fn configure_app(cfg: &mut web::ServiceConfig) {
-    cfg.service(print);
+    cfg.service(scope("/api").service(print));
 }
 
 pub struct AppState {
