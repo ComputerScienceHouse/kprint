@@ -22,16 +22,14 @@ pub async fn get_app_data() -> anyhow::Result<AppState> {
 
     let printers = printers
         .map(|printer| {
-            Ok((
-                printer.to_string(),
-                AsyncIppClient::builder(Uri::try_from(format!("{cups}/printers/{printer}"))?)
-                    .http_header(
-                        "Authorization",
-                        std::env::var("KPRINT_CUPS_PROXY_TOKEN")
-                            .expect("No KPRINT_CUPS_PROXY_TOKEN"),
-                    )
-                    .build(),
-            ))
+            let mut client_builder =
+                AsyncIppClient::builder(Uri::try_from(format!("{cups}/printers/{printer}"))?);
+            if let Ok(token) = std::env::var("KPRINT_CUPS_PROXY_TOKEN") {
+                client_builder = client_builder.http_header("Authorization", token);
+            } else {
+                log::warn!("No KPRINT_CUPS_PROXY_TOKEN environment variable was provided! Is your cups server secure?");
+            }
+            Ok((printer.to_string(), client_builder.build()))
         })
         .collect::<anyhow::Result<HashMap<String, AsyncIppClient>>>()?;
 

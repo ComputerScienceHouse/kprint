@@ -8,7 +8,7 @@ use actix_web::{
     web::{Data, Json, Path, Payload, Query},
     HttpResponse, Responder, ResponseError,
 };
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use ipp::prelude::*;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -117,11 +117,11 @@ pub async fn print(
     app_data: Data<AppState>,
     user: AuthenticatedUser,
     Query(options): Query<PrintOptions>,
-    mut payload: Payload,
+    payload: Payload,
 ) -> Result<impl Responder, KprintError> {
     log::debug!(
         "Got a print request from {}",
-        user.claims.preferred_username().unwrap().to_string()
+        user.claims.preferred_username().unwrap().as_str()
     );
     let printer = match app_data.printers.get(&*printer) {
         Some(printer) => printer,
@@ -130,17 +130,22 @@ pub async fn print(
         }
     };
 
-    let mut page_ranges = options
-        .pages
-        .split(',')
-        .map(|term| parse_range(term.trim()))
-        .filter(|entry| {
-            entry
-                .as_ref()
-                .map(|(start, end)| end > start)
-                .unwrap_or(true)
-        })
-        .collect::<Result<Vec<(i32, i32)>, ParseRangeError>>()?;
+    // Empty string is the same as all pages
+    let mut page_ranges = if !options.pages.trim().is_empty() {
+        options
+            .pages
+            .split(',')
+            .map(|term| parse_range(term.trim()))
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .map(|(start, end)| end > start)
+                    .unwrap_or(true)
+            })
+            .collect::<Result<Vec<(i32, i32)>, ParseRangeError>>()?
+    } else {
+        vec![]
+    };
     page_ranges.sort_by_key(|(start, _end)| *start);
     let page_ranges = page_ranges
         .into_iter()
@@ -153,18 +158,23 @@ pub async fn print(
             }
         })
         .map(|(min, max)| IppValue::RangeOfInteger { min, max })
+        .map(|range| IppAttribute::new("page-ranges", range))
         .collect::<Vec<_>>();
 
     log::debug!("Here's where we landed with panges: {page_ranges:?}");
 
-    let (mut tx, rx) = futures::channel::mpsc::channel(1);
+    let (tx, rx) = futures::channel::mpsc::channel(1);
     actix_web::rt::spawn(async move {
-        while let Some(value) = payload.next().await {
-            tx.try_send(value.map_err(|err| match err {
+        if let Err(err) = payload
+            .map_err(|err| match err {
                 PayloadError::Incomplete(Some(err)) | PayloadError::Io(err) => err,
                 other => std::io::Error::other(other),
-            }))
-            .expect("Something went horribly wrong");
+            })
+            .map(Ok)
+            .forward(tx)
+            .await
+        {
+            log::warn!("Hung up! Cancelling the reader! {err}");
         }
     });
 
@@ -189,15 +199,14 @@ pub async fn print(
                     .to_string(),
             ),
         ))
-        .attribute(IppAttribute::new(
-            "page-ranges",
-            IppValue::Array(page_ranges),
-        ))
+        .attributes(page_ranges)
         .attribute(IppAttribute::new(
             "copies",
             IppValue::Integer(options.copies as i32),
         ))
         .build();
+
+    log::debug!("Sending operation to printer!");
     let response = printer.send(operation).await.map_err(anyhow::Error::from)?;
     let attributes = response.attributes();
     let job_link = attributes
@@ -216,8 +225,8 @@ pub async fn print(
             Uri::from_parts(parts).unwrap()
         })
         .map(|uri| uri.to_string());
-    println!(
-        "Header: {:?} Attributes {:?} Payload {:?}",
+    log::debug!(
+        "Reply from print server! Header: {:?} Attributes {:?} Payload {:?}",
         response.header(),
         response.attributes(),
         response.to_bytes()
