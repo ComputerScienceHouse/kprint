@@ -24,6 +24,7 @@ use tokio_util::io::StreamReader;
 struct SuccessReply {
     message: &'static str,
     job_link: Option<String>,
+    job_id: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +226,12 @@ pub async fn print(
             Uri::from_parts(parts).unwrap()
         })
         .map(|uri| uri.to_string());
+    let job_id = attributes
+        .groups()
+        .iter()
+        .find_map(|group| group.attributes().get("job-id"))
+        .and_then(|job_uri| job_uri.value().as_integer().copied());
+
     log::debug!(
         "Reply from print server! Header: {:?} Attributes {:?} Payload {:?}",
         response.header(),
@@ -234,5 +241,6 @@ pub async fn print(
     Ok(Json(SuccessReply {
         message: "lmao",
         job_link,
+        job_id,
     }))
 }
